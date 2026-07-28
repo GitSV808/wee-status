@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WEE — статус выполнения</title>
+<style>
+  :root{
+    --bg:#f6f7f9; --card:#fff; --fg:#111; --mut:#666; --line:#e3e6ea;
+    --live:#0a7d33; --stale:#b26a00; --down:#b3261e; --run:#1a56db; --done:#5b21b6; --wait:#555;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{ --bg:#0f1115; --card:#171a21; --fg:#eceff4; --mut:#9aa4b2; --line:#252a33;
+           --live:#4ade80; --stale:#fbbf24; --down:#f87171; --run:#60a5fa; --done:#c4b5fd; --wait:#9aa4b2; }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+       font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+       padding:16px;max-width:820px;margin:0 auto}
+  h1{font-size:18px;margin:0 0 4px}
+  .sub{color:var(--mut);font-size:13px;margin-bottom:16px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin-bottom:12px}
+  .row{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap}
+  .badge{display:inline-block;padding:2px 10px;border-radius:999px;font-weight:600;font-size:12px;color:#fff}
+  .b-live{background:var(--live)} .b-stale{background:var(--stale)} .b-down{background:var(--down)}
+  .b-run{background:var(--run)} .b-done{background:var(--done)} .b-wait{background:var(--wait)}
+  .b-block{background:var(--down)}
+  .k{color:var(--mut);font-size:12px;text-transform:uppercase;letter-spacing:.03em}
+  .big{font-size:16px;font-weight:600}
+  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px;
+        white-space:pre-wrap;word-break:break-word}
+  .sergey{border-left:4px solid var(--run);padding-left:12px}
+  ul{margin:6px 0 0;padding-left:18px} li{margin:2px 0}
+  .muted{color:var(--mut)} .hide{display:none}
+  .foot{color:var(--mut);font-size:12px;text-align:center;margin-top:8px}
+  #offline{background:var(--down);color:#fff;text-align:center;padding:10px;border-radius:12px;
+           font-weight:600;margin-bottom:12px}
+</style>
+</head>
+<body>
+  <h1>WEE — статус автономного выполнения</h1>
+  <div class="sub">Проекция GitHub-меток и статуса раннера. Только для чтения. Обновляется автоматически.</div>
+
+  <div id="offline" class="hide">⚠ ДАННЫЕ НЕДОСТУПНЫ — раннер или витрина не отвечают.</div>
+
+  <div class="card">
+    <div class="row">
+      <div><span class="k">Раннер</span><br><span class="big" id="runner-alias">—</span></div>
+      <div style="text-align:right"><span id="live-badge" class="badge b-wait">—</span><br>
+        <span class="muted" id="live-detail">—</span></div>
+    </div>
+  </div>
+
+  <div class="card sergey">
+    <div class="k">Действие Сергея</div>
+    <div class="big" id="sergey">—</div>
+  </div>
+
+  <div class="card" id="current-card">
+    <div class="k">Сейчас выполняется</div>
+    <div class="row"><div class="big" id="cur-title">—</div><div><span id="cur-state" class="badge b-wait">—</span></div></div>
+    <div class="muted" id="cur-step">—</div>
+  </div>
+
+  <div class="card hide" id="blocker-card">
+    <div class="k">Блокер</div>
+    <div class="row"><div class="big" id="blk-issue">—</div><div><span class="badge b-block">BLOCKED</span></div></div>
+    <div class="mono" id="blk-text">—</div>
+    <div class="muted" id="blk-owner">—</div>
+  </div>
+
+  <div class="card" id="lastdone-card">
+    <div class="k">Последняя завершённая</div>
+    <div class="row"><div class="big" id="ld-title">—</div><div><span class="badge b-done" id="ld-badge">DONE</span></div></div>
+    <div class="muted" id="ld-when">—</div>
+  </div>
+
+  <div class="card">
+    <div class="k">Очередь (FIFO)</div>
+    <ul id="queue"><li class="muted">пусто</li></ul>
+  </div>
+
+  <div class="foot" id="foot">—</div>
+
+<script>
+"use strict";
+var FAILS = 0, MAX_FAILS = 3, REFRESH_MS = 20000;
+
+function ago(iso){ if(!iso) return null; var t = Date.parse(iso); if(isNaN(t)) return null;
+  return Math.max(0, Math.round((Date.now()-t)/1000)); }
+function fmtAgo(s){ if(s==null) return "—"; if(s<60) return s+" с назад";
+  if(s<3600) return Math.round(s/60)+" мин назад"; return Math.round(s/3600)+" ч назад"; }
+function setBadge(el, cls, txt){ el.className = "badge "+cls; el.textContent = txt; }
+function stateBadge(el, state){
+  var map={RUNNING:"b-run",DONE:"b-done",WAITING:"b-wait",BLOCKED:"b-block"};
+  setBadge(el, map[state]||"b-wait", state||"—"); }
+
+function liveness(runner){
+  // LIVE/STALE/DOWN computed here from last_heartbeat + runner-provided thresholds (single truth).
+  var s = ago(runner && runner.last_heartbeat);
+  if(s==null) return ["b-down","НЕТ ДАННЫХ", "—"];
+  var stale = (runner.stale_after_s||90), down = (runner.down_after_s||600);
+  var detail = fmtAgo(s)+" · фаза: "+(runner.phase||"—");
+  if(s >= down) return ["b-down","DOWN", detail];
+  if(s >= stale) return ["b-stale","STALE", detail];
+  return ["b-live","LIVE", detail];
+}
+
+function render(d){
+  document.getElementById("offline").classList.add("hide");
+  document.getElementById("runner-alias").textContent = (d.runner&&d.runner.alias)||"—";
+  var lv = liveness(d.runner||{});
+  setBadge(document.getElementById("live-badge"), lv[0], lv[1]);
+  document.getElementById("live-detail").textContent = lv[2];
+
+  document.getElementById("sergey").textContent = d.sergey_action || "Ничего.";
+
+  var cc = document.getElementById("current-card"), cur = d.current;
+  if(cur && cur.number!=null){
+    cc.classList.remove("hide");
+    document.getElementById("cur-title").textContent = cur.title || ("задача #"+cur.number);
+    stateBadge(document.getElementById("cur-state"), cur.state);
+    document.getElementById("cur-step").textContent =
+      (cur.step||"") + (cur.elapsed_s!=null? "  ·  "+cur.elapsed_s+" c" : "");
+  } else {
+    cc.classList.add("hide");
+  }
+
+  var bc = document.getElementById("blocker-card"), b = d.blocker;
+  if(b && b.number!=null){
+    bc.classList.remove("hide");
+    document.getElementById("blk-issue").textContent = "задача #"+b.number;
+    document.getElementById("blk-text").textContent = b.text || "—";
+    document.getElementById("blk-owner").textContent =
+      "Владелец: "+(b.owner||"—")+"  ·  Действие: "+(b.action||"—");
+  } else { bc.classList.add("hide"); }
+
+  var ld = d.last_done, ldc = document.getElementById("lastdone-card");
+  if(ld && ld.number!=null){
+    ldc.classList.remove("hide");
+    document.getElementById("ld-title").textContent = ld.title || ("задача #"+ld.number);
+    document.getElementById("ld-when").textContent = "завершено "+fmtAgo(ago(ld.finished_at));
+  } else { ldc.classList.add("hide"); }
+
+  var q = document.getElementById("queue"); q.innerHTML = "";
+  var items = (d.queue||[]);
+  if(!items.length){ q.innerHTML = '<li class="muted">пусто</li>'; }
+  else items.forEach(function(i){ var li=document.createElement("li");
+    li.textContent = (i.title||("задача #"+i.number)); q.appendChild(li); });
+
+  document.getElementById("foot").textContent =
+    "снапшот: "+fmtAgo(ago(d.generated_at))+"  ·  схема "+(d.schema||"?");
+}
+
+function goOffline(){
+  FAILS++;
+  if(FAILS>=MAX_FAILS){ document.getElementById("offline").classList.remove("hide"); }
+}
+
+function tick(){
+  fetch("status.json?t="+Date.now(), {cache:"no-store"})
+    .then(function(r){ if(!r.ok) throw new Error(r.status); return r.json(); })
+    .then(function(d){ FAILS=0; render(d); })
+    .catch(function(){ goOffline(); });
+}
+tick(); setInterval(tick, REFRESH_MS);
+</script>
+</body>
+</html>
