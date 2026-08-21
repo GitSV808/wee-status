@@ -33,52 +33,46 @@
   ul{margin:6px 0 0;padding-left:18px} li{margin:2px 0}
   .muted{color:var(--mut)} .hide{display:none}
   .foot{color:var(--mut);font-size:12px;text-align:center;margin-top:8px}
+  .lanes{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}
+  .lane{border:1px solid var(--line);border-radius:999px;padding:3px 10px;font-size:12px}
+  .lane b{font-weight:700}
+  .sec-h{display:flex;justify-content:space-between;align-items:baseline;margin:18px 0 6px}
+  .sec-h .t{font-size:13px;text-transform:uppercase;letter-spacing:.04em;color:var(--mut);font-weight:700}
+  .item{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin-bottom:8px}
+  .item.attn{border-left:4px solid var(--stale)}
+  .item .top{display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:baseline}
+  .wid{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;color:var(--mut)}
+  .subj{font-weight:600;margin:4px 0}
+  .meta{display:flex;flex-wrap:wrap;gap:14px;font-size:12px;color:var(--mut);margin-top:6px}
+  .act{margin-top:8px;font-size:13px;font-weight:600}
+  .act.none{color:var(--mut);font-weight:400}
+  #stalebox,#legacy{background:var(--stale);color:#111;text-align:center;padding:10px;
+           border-radius:12px;font-weight:600;margin-bottom:12px}
   #offline{background:var(--down);color:#fff;text-align:center;padding:10px;border-radius:12px;
            font-weight:600;margin-bottom:12px}
 </style>
 </head>
 <body>
   <h1>WEE — статус автономного выполнения</h1>
-  <div class="sub">Проекция GitHub-меток и статуса раннера. Только для чтения. Обновляется автоматически.</div>
+  <div class="sub">Проекция состояния транспорта ролей. Источник истины — dispatcher, не метки GitHub.
+       Только для чтения: доска ничего не берёт в работу и ничего не закрывает.</div>
 
-  <div id="offline" class="hide">⚠ ДАННЫЕ НЕДОСТУПНЫ — раннер или витрина не отвечают.</div>
-
-  <div class="card">
-    <div class="row">
-      <div><span class="k">Раннер</span><br><span class="big" id="runner-alias">—</span></div>
-      <div style="text-align:right"><span id="live-badge" class="badge b-wait">—</span><br>
-        <span class="muted" id="live-detail">—</span></div>
-    </div>
-  </div>
+  <div id="offline" class="hide">⚠ ДАННЫЕ НЕДОСТУПНЫ — витрина не отвечает.</div>
+  <div id="stalebox" class="hide">⚠ СНИМОК УСТАРЕЛ — показанное ниже могло измениться.</div>
+  <div id="legacy" class="hide">⚠ УСТАРЕВШИЙ ФОРМАТ СНИМКА (v1, одна задача). Доска ждёт transport-снимок v2.</div>
 
   <div class="card sergey">
-    <div class="k">Действие Сергея</div>
-    <div class="big" id="sergey">—</div>
-  </div>
-
-  <div class="card" id="current-card">
-    <div class="k">Сейчас выполняется</div>
-    <div class="row"><div class="big" id="cur-title">—</div><div><span id="cur-state" class="badge b-wait">—</span></div></div>
-    <div class="muted" id="cur-step">—</div>
-  </div>
-
-  <div class="card hide" id="blocker-card">
-    <div class="k">Блокер</div>
-    <div class="row"><div class="big" id="blk-issue">—</div><div><span class="badge b-block">BLOCKED</span></div></div>
-    <div class="mono" id="blk-text">—</div>
-    <div class="muted" id="blk-owner">—</div>
-  </div>
-
-  <div class="card" id="lastdone-card">
-    <div class="k">Последняя завершённая</div>
-    <div class="row"><div class="big" id="ld-title">—</div><div><span class="badge b-done" id="ld-badge">DONE</span></div></div>
-    <div class="muted" id="ld-when">—</div>
+    <div class="k">Требуется от вас</div>
+    <div class="big" id="owner-action">—</div>
+    <div class="muted" id="oa-detail">—</div>
   </div>
 
   <div class="card">
-    <div class="k">Очередь (FIFO)</div>
-    <ul id="queue"><li class="muted">пусто</li></ul>
+    <div class="k">Направления</div>
+    <div id="lanes" class="lanes"><span class="muted">—</span></div>
   </div>
+
+  <div id="sections"></div>
 
   <div class="foot" id="foot">—</div>
 
@@ -95,61 +89,97 @@ function stateBadge(el, state){
   var map={RUNNING:"b-run",DONE:"b-done",WAITING:"b-wait",BLOCKED:"b-block"};
   setBadge(el, map[state]||"b-wait", state||"—"); }
 
-function liveness(runner){
-  // LIVE/STALE/DOWN computed here from last_heartbeat + runner-provided thresholds (single truth).
-  var s = ago(runner && runner.last_heartbeat);
-  if(s==null) return ["b-down","НЕТ ДАННЫХ", "—"];
-  var stale = (runner.stale_after_s||90), down = (runner.down_after_s||600);
-  var detail = fmtAgo(s)+" · фаза: "+(runner.phase||"—");
-  if(s >= down) return ["b-down","DOWN", detail];
-  if(s >= stale) return ["b-stale","STALE", detail];
-  return ["b-live","LIVE", detail];
+var STALE_SNAPSHOT_S = 180;
+
+function badgeFor(state){
+  if(state==="IN_PROGRESS"||state==="PATCHED"||state==="DEPLOYED") return "b-run";
+  if(state==="CLOSED"||state==="CONSUMER_ACCEPTED") return "b-done";
+  if(state==="BLOCKED"||state==="FAILED") return "b-block";
+  if(state==="NEEDS_OPERATOR_DECISION"||state==="ESCALATED_ARCHITECT") return "b-stale";
+  return "b-wait";
+}
+function actBadge(a){
+  if(a==="LIVE") return "b-live";
+  if(a==="STALE") return "b-stale";
+  if(a==="DOWN"||a==="NO_CLAIM") return "b-down";
+  return "b-wait";
+}
+function el(tag, cls, txt){
+  var e=document.createElement(tag); if(cls) e.className=cls;
+  if(txt!=null) e.textContent=txt; return e;
+}
+
+function renderItem(i){
+  // The page ages the snapshot ITSELF from last_event_at, so a board that stopped being
+  // refreshed cannot keep showing a comfortable "2 мин назад" forever.
+  var age = ago(i.last_event_at); if(age==null) age = i.last_event_age_s;
+  var d = el("div", "item" + (i.operator_required ? " attn" : ""));
+  var top = el("div","top");
+  var left = el("div");
+  left.appendChild(el("span","wid", i.work_id));
+  top.appendChild(left);
+  var right = el("div");
+  right.appendChild(el("span","badge "+badgeFor(i.state), i.state));
+  top.appendChild(right);
+  d.appendChild(top);
+  d.appendChild(el("div","subj", i.subject || "—"));
+  if(i.summary) d.appendChild(el("div","muted", i.summary));
+  var m = el("div","meta");
+  m.appendChild(el("span",null,"кто: "+i.owner));
+  m.appendChild(el("span",null,"кто дальше: "+i.acts_next));
+  if(i.consumer) m.appendChild(el("span",null,"потребитель: "+i.consumer));
+  m.appendChild(el("span",null,"событие: "+fmtAgo(age)));
+  var ab = el("span","badge "+actBadge(i.activity && i.activity.status),
+              "исполнитель: "+((i.activity&&i.activity.status)||"—"));
+  m.appendChild(ab);
+  if(i.attempt) m.appendChild(el("span",null,"попытка "+i.attempt));
+  d.appendChild(m);
+  if(i.blocker){
+    var b = el("div","mono"); b.textContent = "БЛОКЕР: "+i.blocker; d.appendChild(b);
+  }
+  // The rule, rendered literally: nothing owed unless the item says so.
+  d.appendChild(el("div","act"+(i.operator_required?"":" none"),
+                   i.operator_required ? ("Ваше действие: "+i.operator_question)
+                                       : "Ваше действие: НИЧЕГО"));
+  return d;
 }
 
 function render(d){
-  document.getElementById("offline").classList.add("hide");
-  document.getElementById("runner-alias").textContent = (d.runner&&d.runner.alias)||"—";
-  var lv = liveness(d.runner||{});
-  setBadge(document.getElementById("live-badge"), lv[0], lv[1]);
-  document.getElementById("live-detail").textContent = lv[2];
-
-  document.getElementById("sergey").textContent = d.sergey_action || "Ничего.";
-
-  var cc = document.getElementById("current-card"), cur = d.current;
-  if(cur && cur.number!=null){
-    cc.classList.remove("hide");
-    document.getElementById("cur-title").textContent = cur.title || ("задача #"+cur.number);
-    stateBadge(document.getElementById("cur-state"), cur.state);
-    document.getElementById("cur-step").textContent =
-      (cur.step||"") + (cur.elapsed_s!=null? "  ·  "+cur.elapsed_s+" c" : "");
-  } else {
-    cc.classList.add("hide");
+  var legacy = !(d.schema && d.schema.indexOf("wee-operator-dashboard/2")===0);
+  document.getElementById("legacy").classList.toggle("hide", !legacy);
+  if(legacy){
+    document.getElementById("sections").innerHTML = "";
+    document.getElementById("owner-action").textContent = "—";
+    document.getElementById("foot").textContent = "снимок "+(d.schema||"?")+" — не поддерживается";
+    return;
   }
+  var snapAge = ago(d.generated_at);
+  document.getElementById("stalebox").classList.toggle("hide", !(snapAge!=null && snapAge>=STALE_SNAPSHOT_S));
 
-  var bc = document.getElementById("blocker-card"), b = d.blocker;
-  if(b && b.number!=null){
-    bc.classList.remove("hide");
-    document.getElementById("blk-issue").textContent = "задача #"+b.number;
-    document.getElementById("blk-text").textContent = b.text || "—";
-    document.getElementById("blk-owner").textContent =
-      "Владелец: "+(b.owner||"—")+"  ·  Действие: "+(b.action||"—");
-  } else { bc.classList.add("hide"); }
+  document.getElementById("owner-action").textContent = d.owner_action || "Ничего.";
+  document.getElementById("oa-detail").textContent =
+    d.operator_required_count ? (d.operator_required_count+" работ(ы) ждут вашего решения")
+                              : "ни одна работа не ждёт человека";
 
-  var ld = d.last_done, ldc = document.getElementById("lastdone-card");
-  if(ld && ld.number!=null){
-    ldc.classList.remove("hide");
-    document.getElementById("ld-title").textContent = ld.title || ("задача #"+ld.number);
-    document.getElementById("ld-when").textContent = "завершено "+fmtAgo(ago(ld.finished_at));
-  } else { ldc.classList.add("hide"); }
+  var lanes = document.getElementById("lanes"); lanes.innerHTML="";
+  Object.keys(d.lanes||{}).forEach(function(k){
+    var L=d.lanes[k], e=el("span","lane");
+    e.innerHTML = "<b>"+k+"</b> · "+L.active+(L.active? " · "+L.states.join(","):"");
+    lanes.appendChild(e);
+  });
 
-  var q = document.getElementById("queue"); q.innerHTML = "";
-  var items = (d.queue||[]);
-  if(!items.length){ q.innerHTML = '<li class="muted">пусто</li>'; }
-  else items.forEach(function(i){ var li=document.createElement("li");
-    li.textContent = (i.title||("задача #"+i.number)); q.appendChild(li); });
+  var host = document.getElementById("sections"); host.innerHTML="";
+  (d.sections||[]).forEach(function(sec){
+    var h = el("div","sec-h");
+    h.appendChild(el("span","t", sec.title));
+    h.appendChild(el("span","muted", String(sec.items.length)));
+    host.appendChild(h);
+    if(!sec.items.length){ host.appendChild(el("div","muted","пусто")); return; }
+    sec.items.forEach(function(i){ host.appendChild(renderItem(i)); });
+  });
 
   document.getElementById("foot").textContent =
-    "снапшот: "+fmtAgo(ago(d.generated_at))+"  ·  схема "+(d.schema||"?");
+    "снимок "+fmtAgo(snapAge)+" · активных "+d.active_count+" · источник: "+d.source_of_truth;
 }
 
 function goOffline(){
